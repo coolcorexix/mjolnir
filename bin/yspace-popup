@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+# yspace-popup - Opens a floating terminal with space switcher
+
+osascript << EOF
+tell application "iTerm"
+    # Create a new floating window
+    create window with default profile
+
+    tell current session of current window
+        write text "$HOME/bin/yspace-fzf; exit"
+    end tell
+
+    # Make window smaller and centered
+    tell current window
+        set bounds to {500, 200, 1100, 500}
+    end tell
+
+    activate
+end tell
+EOF

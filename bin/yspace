@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+
+# yspace - Jump to yabai space by name or query spaces
+# Usage:
+#   yspace <space-name>  - Jump to space by label, app name, or repo name
+#   yspace list          - List all spaces with their labels/apps
+#   yspace query         - Show detailed space information
+
+set -e
+
+# Function to get space display name (label or app name for fullscreen)
+get_space_info() {
+    SPACES=$(yabai -m query --spaces)
+    WINDOWS=$(yabai -m query --windows)
+
+    echo "$SPACES" | jq -r --argjson windows "$WINDOWS" '
+        .[] |
+        . as $space |
+        if .label != "" then
+            "\(.index)|\(.label)|label|"
+        elif .["is-native-fullscreen"] == true then
+            ($windows | map(select(.space == $space.index)) | first) as $win |
+            ($win.app // "unknown") as $app |
+            ($win.title // "") as $title |
+            # Extract repo name for Code/Cursor windows
+            if ($app == "Code" or $app == "Cursor") then
+                # Try to extract repo name from title
+                # Pattern 1: "name (Workspace)" -> name
+                # Pattern 2: "file — folder" -> folder
+                ($title | if test(" \\(Workspace\\)$") then
+                    gsub(" \\(Workspace\\)$"; "")
+                elif test(" — ") then
+                    split(" — ") | last
+                else
+                    ""
+                end) as $repo |
+                "\($space.index)|\($app):\($repo)|app|\($repo)"
+            else
+                "\($space.index)|\($app)|app|"
+            end
+        else
+            "\(.index)|unlabeled|none|"
+        end
+    '
+}
+
+if [ $# -eq 0 ]; then
+    echo "Usage: yspace <space-name|list|query>"
+    echo ""
+    echo "Commands:"
+    echo "  yspace <name>    Jump to space by label, app, or repo name"
+    echo "                   (e.g., yspace Slack, yspace saleshood)"
+    echo "  yspace list      List all spaces with their labels/apps"
+    echo "  yspace query     Show detailed space information"
+    exit 1
+fi
+
+case "$1" in
+    list)
+        echo "Spaces:"
+        get_space_info | while IFS='|' read -r index name type repo; do
+            if [ "$type" = "app" ]; then
+                echo "  $index: $name (fullscreen)"
+            else
+                echo "  $index: $name"
+            fi
+        done
+        ;;
+    query)
+        yabai -m query --spaces | jq '.'
+        ;;
+    *)
+        # Jump to space by name (label, app name, or repo name)
+        SPACE_NAME="$1"
+
+        # First try to find by label
+        SPACE_INDEX=$(yabai -m query --spaces | jq -r ".[] | select(.label == \"$SPACE_NAME\") | .index")
+
+        # If not found by label, try to find by app name or repo name
+        if [ -z "$SPACE_INDEX" ]; then
+            # Search through space info for matching app or repo name
+            SPACE_INDEX=$(get_space_info | while IFS='|' read -r index name type repo; do
+                name_lower=$(echo "$name" | tr '[:upper:]' '[:lower:]')
+                search_lower=$(echo "$SPACE_NAME" | tr '[:upper:]' '[:lower:]')
+                repo_lower=$(echo "$repo" | tr '[:upper:]' '[:lower:]')
+
+                # Match by app name (e.g., "Slack", "iTerm2")
+                if [ "$name_lower" = "$search_lower" ]; then
+                    echo "$index"
+                    break
+                fi
+                # Match by repo name for Code/Cursor (e.g., "saleshood", "totomo-webapp")
+                if [ -n "$repo_lower" ] && [ "$repo_lower" = "$search_lower" ]; then
+                    echo "$index"
+                    break
+                fi
+            done)
+        fi
+
+        if [ -z "$SPACE_INDEX" ]; then
+            echo "Error: Space '$SPACE_NAME' not found"
+            echo ""
+            echo "Available spaces:"
+            get_space_info | while IFS='|' read -r index name type repo; do
+                if [ "$type" = "app" ]; then
+                    echo "  $index: $name (fullscreen)"
+                else
+                    echo "  $index: $name"
+                fi
+            done
+            exit 1
+        fi
+
+        # Get current space index
+        CURRENT_INDEX=$(yabai -m query --spaces --space | jq '.index')
+
+        if [ "$SPACE_INDEX" -eq "$CURRENT_INDEX" ]; then
+            echo "Already on space: $SPACE_NAME"
+            exit 0
+        fi
+
+        # Calculate direction and number of moves
+        if [ "$SPACE_INDEX" -gt "$CURRENT_INDEX" ]; then
+            MOVES=$((SPACE_INDEX - CURRENT_INDEX))
+            KEY_CODE=124  # Right arrow
+        else
+            MOVES=$((CURRENT_INDEX - SPACE_INDEX))
+            KEY_CODE=123  # Left arrow
+        fi
+
+        # Use Ctrl+Arrow to switch spaces
+        for ((i=0; i<MOVES; i++)); do
+            osascript -e "tell application \"System Events\" to key code $KEY_CODE using control down"
+            sleep 0.3
+        done
+
+        echo "Switched to space: $SPACE_NAME (index: $SPACE_INDEX)"
+        ;;
+esac

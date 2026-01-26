@@ -1,0 +1,4 @@
+# skhd config - hotkey daemon for macOS
+
+# Alt+S: Open floating Spotlight-like space switcher
+alt - s : ~/bin/yspace-float

@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+
+# yspace-picker - Space switcher using native macOS dialog
+# Works with global hotkeys without needing a terminal
+
+set -e
+
+# Get space info
+get_space_list() {
+    SPACES=$(yabai -m query --spaces)
+    WINDOWS=$(yabai -m query --windows)
+
+    echo "$SPACES" | jq -r --argjson windows "$WINDOWS" '
+        .[] |
+        . as $space |
+        if .label != "" then
+            "\(.index): \(.label)"
+        elif .["is-native-fullscreen"] == true then
+            ($windows | map(select(.space == $space.index)) | first) as $win |
+            ($win.app // "unknown") as $app |
+            ($win.title // "") as $title |
+            if ($app == "Code" or $app == "Cursor") then
+                ($title | if test(" \\(Workspace\\)$") then
+                    gsub(" \\(Workspace\\)$"; "")
+                elif test(" — ") then
+                    split(" — ") | last
+                else
+                    ""
+                end) as $repo |
+                "\($space.index): \($app):\($repo)"
+            else
+                "\($space.index): \($app)"
+            end
+        else
+            "\($space.index): Desktop \($space.index)"
+        end
+    '
+}
+
+# Get current space
+CURRENT_INDEX=$(yabai -m query --spaces --space | jq '.index')
+
+# Build list for AppleScript
+SPACE_LIST=$(get_space_list)
+ITEMS=$(echo "$SPACE_LIST" | awk '{printf "\"%s\", ", $0}' | sed 's/, $//')
+
+# Show picker dialog
+SELECTED=$(osascript << EOF
+set spaceList to {$ITEMS}
+set selectedSpace to choose from list spaceList with prompt "Switch to space:" with title "Space Switcher" default items {}
+if selectedSpace is false then
+    return ""
+else
+    return item 1 of selectedSpace
+end if
+EOF
+)
+
+if [ -z "$SELECTED" ] || [ "$SELECTED" = "" ]; then
+    exit 0
+fi
+
+# Extract space index from selection (first number before colon)
+SPACE_INDEX=$(echo "$SELECTED" | cut -d':' -f1 | tr -d ' ')
+
+if [ "$SPACE_INDEX" -eq "$CURRENT_INDEX" ]; then
+    exit 0
+fi
+
+# Calculate direction and number of moves
+if [ "$SPACE_INDEX" -gt "$CURRENT_INDEX" ]; then
+    MOVES=$((SPACE_INDEX - CURRENT_INDEX))
+    KEY_CODE=124  # Right arrow
+else
+    MOVES=$((CURRENT_INDEX - SPACE_INDEX))
+    KEY_CODE=123  # Left arrow
+fi
+
+# Use Ctrl+Arrow to switch spaces
+for ((i=0; i<MOVES; i++)); do
+    osascript -e "tell application \"System Events\" to key code $KEY_CODE using control down"
+    sleep 0.3
+done

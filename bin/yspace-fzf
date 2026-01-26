@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+
+# yspace-fzf - Interactive space switcher with fuzzy search
+# Uses fzf for live searching and switches to selected space on Enter
+
+set -e
+
+# Get space info (same logic as yspace)
+get_space_info() {
+    SPACES=$(yabai -m query --spaces)
+    WINDOWS=$(yabai -m query --windows)
+
+    echo "$SPACES" | jq -r --argjson windows "$WINDOWS" '
+        .[] |
+        . as $space |
+        if .label != "" then
+            "\(.index)|\(.label)|label|"
+        elif .["is-native-fullscreen"] == true then
+            ($windows | map(select(.space == $space.index)) | first) as $win |
+            ($win.app // "unknown") as $app |
+            ($win.title // "") as $title |
+            if ($app == "Code" or $app == "Cursor") then
+                ($title | if test(" \\(Workspace\\)$") then
+                    gsub(" \\(Workspace\\)$"; "")
+                elif test(" — ") then
+                    split(" — ") | last
+                else
+                    ""
+                end) as $repo |
+                "\($space.index)|\($app):\($repo)|app|\($repo)"
+            else
+                "\($space.index)|\($app)|app|"
+            end
+        else
+            "\(.index)|unlabeled|none|"
+        end
+    '
+}
+
+# Get current space for highlighting
+CURRENT_INDEX=$(yabai -m query --spaces --space | jq '.index')
+
+# Build the list for fzf
+SPACE_LIST=$(get_space_info | while IFS='|' read -r index name type repo; do
+    if [ "$index" = "$CURRENT_INDEX" ]; then
+        echo "$index|$name|* current"
+    else
+        echo "$index|$name|"
+    fi
+done)
+
+# Run fzf and get selection
+SELECTED=$(echo "$SPACE_LIST" | fzf \
+    --prompt="Switch to space: " \
+    --header="Press Enter to switch, Esc to cancel" \
+    --height=40% \
+    --reverse \
+    --delimiter='|' \
+    --with-nth=2,3 \
+    --preview-window=hidden \
+    --bind='enter:accept' \
+    --ansi \
+    --no-multi)
+
+if [ -z "$SELECTED" ]; then
+    exit 0
+fi
+
+# Extract space index from selection
+SPACE_INDEX=$(echo "$SELECTED" | cut -d'|' -f1)
+
+if [ "$SPACE_INDEX" -eq "$CURRENT_INDEX" ]; then
+    echo "Already on this space"
+    exit 0
+fi
+
+# Calculate direction and number of moves
+if [ "$SPACE_INDEX" -gt "$CURRENT_INDEX" ]; then
+    MOVES=$((SPACE_INDEX - CURRENT_INDEX))
+    KEY_CODE=124  # Right arrow
+else
+    MOVES=$((CURRENT_INDEX - SPACE_INDEX))
+    KEY_CODE=123  # Left arrow
+fi
+
+# Use Ctrl+Arrow to switch spaces
+for ((i=0; i<MOVES; i++)); do
+    osascript -e "tell application \"System Events\" to key code $KEY_CODE using control down"
+    sleep 0.3
+done
+
+SPACE_NAME=$(echo "$SELECTED" | cut -d'|' -f2)
+echo "Switched to: $SPACE_NAME"

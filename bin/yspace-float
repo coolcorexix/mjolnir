@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+
+# yspace-float - Floating app/space switcher
+# Uses yabai for querying window info, native activation for instant switching
+
+set -e
+
+# Temp file to store window/tab mappings
+MAPPING_FILE="/tmp/yspace-float-mapping.$$"
+trap "rm -f $MAPPING_FILE" EXIT
+
+# Get iTerm2 tabs
+get_iterm_tabs() {
+    if ! pgrep -q "iTerm2"; then
+        return
+    fi
+
+    osascript << 'EOF' 2>/dev/null
+tell application "iTerm2"
+    set output to ""
+    set winIndex to 0
+    repeat with w in windows
+        set winIndex to winIndex + 1
+        set tabIndex to 0
+        repeat with t in tabs of w
+            set tabIndex to tabIndex + 1
+            -- Get custom tab title if set, otherwise fall back to session name
+            try
+                set tabTitle to title of t
+                if tabTitle is "" or tabTitle is missing value then
+                    set tabTitle to name of current session of t
+                end if
+            on error
+                set tabTitle to name of current session of t
+            end try
+            set output to output & "iTerm2: " & tabTitle & "|iterm|" & winIndex & "|" & tabIndex & linefeed
+        end repeat
+    end repeat
+    return output
+end tell
+EOF
+}
+
+# Get app list with window details from yabai
+get_app_list() {
+    # Check if yabai is running
+    if ! yabai -m query --windows &>/dev/null; then
+        # Fallback to simple AppleScript list
+        osascript -e '
+            tell application "System Events"
+                set appNames to displayed name of every process whose background only is false
+            end tell
+            set AppleScript'\''s text item delimiters to linefeed
+            return appNames as text
+        ' | grep -v "Helper" | sort -u | while read -r app; do
+            echo "$app|app||"
+        done
+        return
+    fi
+
+    # Get windows from yabai (excluding iTerm2, we handle it separately)
+    yabai -m query --windows | jq -r '
+        group_by(.app) |
+        .[] |
+        .[0] as $first |
+        if ($first.app == "Code" or $first.app == "Cursor") then
+            .[] |
+            .id as $id |
+            .title as $title |
+            ($title | split(" — ") | last) as $repo |
+            ($repo | sub(" \\(Workspace\\)$"; "")) as $cleanRepo |
+            "\(.app): \($cleanRepo)|window|\($id)|"
+        elif ($first.app == "iTerm2") then
+            empty
+        else
+            "\($first.app)|app||"
+        end
+    ' | sort -u
+}
+
+# Get the lists and save mappings
+APP_LIST=$(get_app_list | grep -v '^$')
+ITERM_TABS=$(get_iterm_tabs | grep -v '^$')
+
+# Combine and save to mapping file
+{
+    echo "$ITERM_TABS"
+    echo "$APP_LIST"
+} | grep -v '^$' > "$MAPPING_FILE"
+
+# Extract display names for the picker
+FULL_LIST=$(cat "$MAPPING_FILE" | cut -d'|' -f1 | grep -v '^$')
+
+if [ -z "$FULL_LIST" ]; then
+    echo "No apps found"
+    exit 1
+fi
+
+# Show floating picker
+SELECTED=$(echo "$FULL_LIST" | choose -p "Switch to app")
+
+if [ -z "$SELECTED" ]; then
+    exit 0
+fi
+
+# Find the mapping for the selected item
+MAPPING=$(grep "^${SELECTED}|" "$MAPPING_FILE" | head -1)
+TYPE=$(echo "$MAPPING" | cut -d'|' -f2)
+PARAM1=$(echo "$MAPPING" | cut -d'|' -f3)
+PARAM2=$(echo "$MAPPING" | cut -d'|' -f4)
+
+case "$TYPE" in
+    iterm)
+        # iTerm2 tab: PARAM1=window index, PARAM2=tab index
+        osascript << EOF
+tell application "iTerm2"
+    activate
+    tell window $PARAM1
+        select tab $PARAM2
+    end tell
+end tell
+EOF
+        ;;
+    window)
+        # Specific window (Code/Cursor): PARAM1=window ID
+        yabai -m window "$PARAM1" --focus
+        ;;
+    app)
+        # Regular app: just activate
+        APP_NAME=$(echo "$SELECTED" | cut -d':' -f1)
+        osascript -e "tell application \"$APP_NAME\" to activate"
+        ;;
+    *)
+        # Fallback: try to activate by name
+        APP_NAME=$(echo "$SELECTED" | cut -d':' -f1)
+        osascript -e "tell application \"$APP_NAME\" to activate"
+        ;;
+esac
