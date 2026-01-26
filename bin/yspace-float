@@ -33,7 +33,47 @@ tell application "iTerm2"
             on error
                 set tabTitle to name of current session of t
             end try
+            -- Replace pipe characters to avoid delimiter conflicts
+            set AppleScript's text item delimiters to "|"
+            set tabTitle to text items of tabTitle
+            set AppleScript's text item delimiters to "-"
+            set tabTitle to tabTitle as text
+            set AppleScript's text item delimiters to ""
             set output to output & "iTerm2: " & tabTitle & "|iterm|" & winIndex & "|" & tabIndex & linefeed
+        end repeat
+    end repeat
+    return output
+end tell
+EOF
+}
+
+# Get Google Chrome tabs
+get_chrome_tabs() {
+    if ! pgrep -q "Google Chrome"; then
+        return
+    fi
+
+    osascript << 'EOF' 2>/dev/null
+tell application "Google Chrome"
+    set output to ""
+    set winIndex to 0
+    repeat with w in windows
+        set winIndex to winIndex + 1
+        set tabIndex to 0
+        repeat with t in tabs of w
+            set tabIndex to tabIndex + 1
+            set tabTitle to title of t
+            -- Replace pipe characters to avoid delimiter conflicts
+            set AppleScript's text item delimiters to "|"
+            set tabTitle to text items of tabTitle
+            set AppleScript's text item delimiters to "-"
+            set tabTitle to tabTitle as text
+            set AppleScript's text item delimiters to ""
+            -- Truncate long titles
+            if length of tabTitle > 60 then
+                set tabTitle to text 1 thru 57 of tabTitle & "..."
+            end if
+            set output to output & "Chrome: " & tabTitle & "|chrome|" & winIndex & "|" & tabIndex & linefeed
         end repeat
     end repeat
     return output
@@ -70,7 +110,7 @@ get_app_list() {
             ($title | split(" — ") | last) as $repo |
             ($repo | sub(" \\(Workspace\\)$"; "")) as $cleanRepo |
             "\(.app): \($cleanRepo)|window|\($id)|"
-        elif ($first.app == "iTerm2") then
+        elif ($first.app == "iTerm2" or $first.app == "Google Chrome") then
             empty
         else
             "\($first.app)|app||"
@@ -81,10 +121,12 @@ get_app_list() {
 # Get the lists and save mappings
 APP_LIST=$(get_app_list | grep -v '^$')
 ITERM_TABS=$(get_iterm_tabs | grep -v '^$')
+CHROME_TABS=$(get_chrome_tabs | grep -v '^$')
 
 # Combine and save to mapping file
 {
     echo "$ITERM_TABS"
+    echo "$CHROME_TABS"
     echo "$APP_LIST"
 } | grep -v '^$' > "$MAPPING_FILE"
 
@@ -118,6 +160,16 @@ tell application "iTerm2"
     tell window $PARAM1
         select tab $PARAM2
     end tell
+end tell
+EOF
+        ;;
+    chrome)
+        # Chrome tab: PARAM1=window index, PARAM2=tab index
+        osascript << EOF
+tell application "Google Chrome"
+    activate
+    set active tab index of window $PARAM1 to $PARAM2
+    set index of window $PARAM1 to 1
 end tell
 EOF
         ;;
