@@ -42,7 +42,8 @@ create_symlink "$CONFIG_DIR/skhdrc" "$HOME/.skhdrc"
 
 echo ""
 echo "Setting up bin symlinks..."
-for script in "$BIN_DIR"/yspace*; do
+for script in "$BIN_DIR"/yspace* "$BIN_DIR"/mjolnir-*; do
+    [ -e "$script" ] || continue
     script_name="$(basename "$script")"
     create_symlink "$script" "$HOME/bin/$script_name"
 done
@@ -56,6 +57,7 @@ echo "Done! Installed:"
 echo "  Config: ~/.yabairc -> mjolnir/config/yabairc"
 echo "  Config: ~/.skhdrc -> mjolnir/config/skhdrc"
 echo "  Scripts: ~/bin/yspace* -> mjolnir/bin/yspace*"
+echo "  Hook: ~/bin/mjolnir-claude-hook -> mjolnir/bin/mjolnir-claude-hook"
 echo ""
 echo "Make sure ~/bin is in your PATH. Add this to ~/.zshrc if needed:"
 echo '  export PATH="$HOME/bin:$PATH"'

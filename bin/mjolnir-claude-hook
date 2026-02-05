@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+
+# mjolnir-claude-hook - Signal mjolnir when Claude Code needs user attention
+# Used as a Claude Code hook for PermissionRequest / PostToolUse / Stop events
+#
+# Creates/removes signal files in /tmp/mjolnir-claude-waiting/ so that
+# yspace-float can prioritize terminals waiting for approval.
+
+SIGNAL_DIR="/tmp/mjolnir-claude-waiting"
+mkdir -p "$SIGNAL_DIR"
+
+INPUT=$(cat)
+EVENT=$(echo "$INPUT" | jq -r '.hook_event_name')
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id')
+
+case "$EVENT" in
+    PermissionRequest)
+        CWD=$(echo "$INPUT" | jq -r '.cwd')
+        TOOL=$(echo "$INPUT" | jq -r '.tool_name // "unknown"')
+        # Walk up process tree to find the TTY of the Claude Code process
+        TTY=$(ps -o tty= -p $PPID 2>/dev/null | tr -d ' ')
+        if [ -z "$TTY" ] || [ "$TTY" = "??" ]; then
+            # Try grandparent if direct parent has no TTY
+            GRANDPARENT=$(ps -o ppid= -p $PPID 2>/dev/null | tr -d ' ')
+            TTY=$(ps -o tty= -p "$GRANDPARENT" 2>/dev/null | tr -d ' ')
+        fi
+        jq -n \
+            --arg cwd "$CWD" \
+            --arg tty "${TTY:-unknown}" \
+            --arg tool "$TOOL" \
+            --arg ts "$(date +%s)" \
+            '{cwd: $cwd, tty: $tty, tool: $tool, timestamp: $ts}' \
+            > "$SIGNAL_DIR/$SESSION_ID"
+        ;;
+    PostToolUse|Stop)
+        rm -f "$SIGNAL_DIR/$SESSION_ID"
+        ;;
+esac
+
+# Clean stale signals (older than 10 minutes)
+find "$SIGNAL_DIR" -type f -mmin +10 -delete 2>/dev/null
+
+exit 0
