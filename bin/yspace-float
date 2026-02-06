@@ -331,3 +331,36 @@ EOF
         osascript -e "tell application \"$APP_NAME\" to activate"
         ;;
 esac
+
+# Clear done signal if user focused on a completed item
+if [[ "$SELECTED" == "✅ "* ]]; then
+    SIGNAL_DIR="/tmp/mjolnir-claude-waiting"
+    # Extract the actual name without the checkmark prefix
+    CLEAN_NAME="${SELECTED#✅ }"
+
+    if [ "$TYPE" = "window" ]; then
+        # Code/Cursor window - match by project name
+        PROJECT_NAME="${CLEAN_NAME#*: }"
+        for f in "$SIGNAL_DIR"/*; do
+            [ -f "$f" ] || continue
+            sig_cwd=$(jq -r '.cwd // empty' "$f" 2>/dev/null)
+            sig_status=$(jq -r '.status // empty' "$f" 2>/dev/null)
+            if [ "$(basename "$sig_cwd")" = "$PROJECT_NAME" ] && [ "$sig_status" = "done" ]; then
+                rm -f "$f"
+                break
+            fi
+        done
+    elif [ "$TYPE" = "iterm" ]; then
+        # iTerm tab - match by TTY (PARAM2 has tab index, need to get TTY from mapping)
+        # The TTY was in field 5 of original iterm output before marking
+        # For simplicity, match by project name from CWD if available
+        for f in "$SIGNAL_DIR"/*; do
+            [ -f "$f" ] || continue
+            sig_status=$(jq -r '.status // empty' "$f" 2>/dev/null)
+            if [ "$sig_status" = "done" ]; then
+                rm -f "$f"
+                break
+            fi
+        done
+    fi
+fi
