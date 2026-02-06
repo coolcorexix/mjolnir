@@ -40,6 +40,17 @@ get_waiting_ttys() {
     fi
 }
 
+# Collect project names (basename of CWD) that have Claude Code waiting
+get_waiting_projects() {
+    SIGNAL_DIR="/tmp/mjolnir-claude-waiting"
+    if [ -d "$SIGNAL_DIR" ]; then
+        for f in "$SIGNAL_DIR"/*; do
+            [ -f "$f" ] || continue
+            jq -r '.cwd // empty' "$f" 2>/dev/null | xargs -I{} basename "{}"
+        done
+    fi
+}
+
 # Get iTerm2 tabs (with Claude Code waiting detection via signal files)
 get_iterm_tabs() {
     if ! pgrep -q "iTerm2"; then
@@ -107,6 +118,31 @@ mark_waiting_tabs() {
             echo "⏳ ${display}|${type}|${param1}|${param2}|1"
         else
             echo "${display}|${type}|${param1}|${param2}|0"
+        fi
+    done
+}
+
+# Post-process Code/Cursor windows: mark waiting ones based on project name match
+mark_waiting_windows() {
+    local waiting_projects="$1"
+    while IFS='|' read -r display type param1 param2 flag; do
+        [ -z "$display" ] && continue
+        local is_waiting=0
+        # For Code/Cursor windows, check if project name matches any waiting project
+        if [ "$type" = "window" ] && [ -n "$waiting_projects" ]; then
+            # Extract project name from display (e.g., "Code: mjolnir" -> "mjolnir")
+            local project_name="${display#*: }"
+            while IFS= read -r wproj; do
+                if [ "$project_name" = "$wproj" ]; then
+                    is_waiting=1
+                    break
+                fi
+            done <<< "$waiting_projects"
+        fi
+        if [ "$is_waiting" -eq 1 ]; then
+            echo "⏳ ${display}|${type}|${param1}|${param2}|1"
+        else
+            echo "${display}|${type}|${param1}|${param2}|${flag}"
         fi
     done
 }
@@ -183,8 +219,9 @@ get_app_list() {
 }
 
 # Get the lists and save mappings
-APP_LIST=$(get_app_list | grep -v '^$')
 WAITING_TTYS=$(get_waiting_ttys)
+WAITING_PROJECTS=$(get_waiting_projects)
+APP_LIST=$(get_app_list | grep -v '^$' | mark_waiting_windows "$WAITING_PROJECTS")
 ITERM_TABS=$(get_iterm_tabs | grep -v '^$' | mark_waiting_tabs "$WAITING_TTYS")
 CHROME_TABS=$(get_chrome_tabs | grep -v '^$')
 FOCUS_ORDER=$(get_app_focus_order)
