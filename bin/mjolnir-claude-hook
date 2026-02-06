@@ -29,11 +29,36 @@ case "$EVENT" in
             --arg tty "${TTY:-unknown}" \
             --arg tool "$TOOL" \
             --arg ts "$(date +%s)" \
-            '{cwd: $cwd, tty: $tty, tool: $tool, timestamp: $ts}' \
+            --arg status "waiting" \
+            '{cwd: $cwd, tty: $tty, tool: $tool, timestamp: $ts, status: $status}' \
             > "$SIGNAL_DIR/$SESSION_ID"
         ;;
-    PostToolUse|Stop)
+    PostToolUse)
+        # Tool finished, remove waiting status (Claude may continue working)
         rm -f "$SIGNAL_DIR/$SESSION_ID"
+        ;;
+    Stop)
+        # Claude finished responding - mark as done so user can see result
+        if [ -f "$SIGNAL_DIR/$SESSION_ID" ]; then
+            # Update existing signal to done status
+            jq '.status = "done" | .timestamp = "'$(date +%s)'"' "$SIGNAL_DIR/$SESSION_ID" > "$SIGNAL_DIR/$SESSION_ID.tmp" \
+                && mv "$SIGNAL_DIR/$SESSION_ID.tmp" "$SIGNAL_DIR/$SESSION_ID"
+        else
+            # Create new done signal if none exists
+            CWD=$(echo "$INPUT" | jq -r '.cwd')
+            TTY=$(ps -o tty= -p $PPID 2>/dev/null | tr -d ' ')
+            if [ -z "$TTY" ] || [ "$TTY" = "??" ]; then
+                GRANDPARENT=$(ps -o ppid= -p $PPID 2>/dev/null | tr -d ' ')
+                TTY=$(ps -o tty= -p "$GRANDPARENT" 2>/dev/null | tr -d ' ')
+            fi
+            jq -n \
+                --arg cwd "$CWD" \
+                --arg tty "${TTY:-unknown}" \
+                --arg ts "$(date +%s)" \
+                --arg status "done" \
+                '{cwd: $cwd, tty: $tty, timestamp: $ts, status: $status}' \
+                > "$SIGNAL_DIR/$SESSION_ID"
+        fi
         ;;
 esac
 
