@@ -269,6 +269,23 @@ rm -rf ~/Applications/MjolnirBar.app
 brew uninstall yabai skhd choose-gui jq
 ```
 
+## Changelog
+
+### 2025-03-18
+
+- **Fix**: macOS compatibility for `yspace-cache` — replaced Linux `flock` with `mkdir`-based locking
+- **Fix**: AppleScript heredoc syntax to avoid quote escaping issues
+- **Add**: Background cache updater (`yspace-cache`) for instant picker response
+- **Add**: `mjolnir-restart` script for robust service management (handles stale PID files)
+- **Add**: Health checks in MjolnirBar — auto-restarts unhealthy yabai/skhd
+- **Add**: "Open App Switcher" menu item in MjolnirBar
+
+### 2025-03-17
+
+- **Add**: Done status (✅) for completed Claude Code sessions
+- **Add**: VSCode/Cursor window detection for Claude Code waiting indicators
+- **Add**: MjolnirBar menu bar app with Claude Code integration
+
 ## License
 
 MIT

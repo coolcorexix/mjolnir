@@ -1,0 +1,267 @@
+#!/usr/bin/env bash
+
+# yspace-cache - Background cache updater for yspace-float
+# Generates the app list and writes to cache file
+
+CACHE_FILE="/tmp/yspace-float-cache"
+CACHE_LOCK="/tmp/yspace-float-cache.lock"
+
+# Use lock to prevent concurrent writes (macOS compatible)
+if ! mkdir "$CACHE_LOCK" 2>/dev/null; then
+    exit 0
+fi
+trap "rmdir '$CACHE_LOCK' 2>/dev/null" EXIT
+
+# Get apps in most-recently-focused order via CGWindowList (front-to-back layer order)
+get_app_focus_order() {
+    osascript -l JavaScript -e '
+        ObjC.import("CoreGraphics");
+        var wins = $.CGWindowListCopyWindowInfo($.kCGWindowListExcludeDesktopElements, 0);
+        var seen = {};
+        var result = [];
+        for (var i = 0; i < wins.count; i++) {
+            var w = wins.objectAtIndex(i);
+            var name = ObjC.unwrap(w.objectForKey("kCGWindowOwnerName"));
+            var layer = ObjC.unwrap(w.objectForKey("kCGWindowLayer"));
+            if (name && !seen[name] && layer === 0) {
+                seen[name] = true;
+                result.push(name);
+            }
+        }
+        result.join("\n");
+    ' 2>/dev/null
+}
+
+# Collect TTYs with their status (waiting/done) from signal files
+get_signal_ttys() {
+    SIGNAL_DIR="/tmp/mjolnir-claude-waiting"
+    if [ -d "$SIGNAL_DIR" ]; then
+        for f in "$SIGNAL_DIR"/*; do
+            [ -f "$f" ] || continue
+            jq -r '"\(.tty // "")|\(.status // "waiting")"' "$f" 2>/dev/null
+        done
+    fi
+}
+
+# Collect project names with their status from signal files
+get_signal_projects() {
+    SIGNAL_DIR="/tmp/mjolnir-claude-waiting"
+    if [ -d "$SIGNAL_DIR" ]; then
+        for f in "$SIGNAL_DIR"/*; do
+            [ -f "$f" ] || continue
+            local cwd=$(jq -r '.cwd // empty' "$f" 2>/dev/null)
+            local status=$(jq -r '.status // "waiting"' "$f" 2>/dev/null)
+            [ -n "$cwd" ] && echo "$(basename "$cwd")|$status"
+        done
+    fi
+}
+
+# Get iTerm2 tabs
+get_iterm_tabs() {
+    if ! pgrep -q "iTerm2"; then
+        return
+    fi
+
+    osascript << 'EOF' 2>/dev/null
+tell application "iTerm2"
+    set output to ""
+    set winIndex to 0
+    repeat with w in windows
+        set winIndex to winIndex + 1
+        set tabIndex to 0
+        repeat with t in tabs of w
+            set tabIndex to tabIndex + 1
+            try
+                set tabTitle to title of t
+                if tabTitle is "" or tabTitle is missing value then
+                    set tabTitle to name of current session of t
+                end if
+            on error
+                set tabTitle to name of current session of t
+            end try
+
+            set sessionTTY to ""
+            try
+                set sessionTTY to tty of current session of t
+            end try
+
+            set AppleScript's text item delimiters to "|"
+            set tabTitle to text items of tabTitle
+            set AppleScript's text item delimiters to "-"
+            set tabTitle to tabTitle as text
+            set AppleScript's text item delimiters to ""
+
+            set output to output & "iTerm2: " & tabTitle & "|iterm|" & winIndex & "|" & tabIndex & "|" & sessionTTY & linefeed
+        end repeat
+    end repeat
+    return output
+end tell
+EOF
+}
+
+# Post-process iTerm2 tabs: mark based on signal status
+mark_signal_tabs() {
+    local signal_ttys="$1"
+    while IFS='|' read -r display type param1 param2 tty; do
+        [ -z "$display" ] && continue
+        local match_status=""
+        if [ -n "$tty" ] && [ -n "$signal_ttys" ]; then
+            local short_tty="${tty#/dev/}"
+            while IFS='|' read -r stty sstatus; do
+                if [ "$short_tty" = "$stty" ]; then
+                    match_status="$sstatus"
+                    break
+                fi
+            done <<< "$signal_ttys"
+        fi
+        case "$match_status" in
+            waiting)
+                echo "⏳ ${display}|${type}|${param1}|${param2}|2"
+                ;;
+            done)
+                echo "✅ ${display}|${type}|${param1}|${param2}|1"
+                ;;
+            *)
+                echo "${display}|${type}|${param1}|${param2}|0"
+                ;;
+        esac
+    done
+}
+
+# Post-process Code/Cursor windows: mark based on signal status
+mark_signal_windows() {
+    local signal_projects="$1"
+    while IFS='|' read -r display type param1 param2 flag; do
+        [ -z "$display" ] && continue
+        local match_status=""
+        if [ "$type" = "window" ] && [ -n "$signal_projects" ]; then
+            local project_name="${display#*: }"
+            while IFS='|' read -r sproj sstatus; do
+                if [ "$project_name" = "$sproj" ]; then
+                    match_status="$sstatus"
+                    break
+                fi
+            done <<< "$signal_projects"
+        fi
+        case "$match_status" in
+            waiting)
+                echo "⏳ ${display}|${type}|${param1}|${param2}|2"
+                ;;
+            done)
+                echo "✅ ${display}|${type}|${param1}|${param2}|1"
+                ;;
+            *)
+                echo "${display}|${type}|${param1}|${param2}|${flag}"
+                ;;
+        esac
+    done
+}
+
+# Get Google Chrome tabs
+get_chrome_tabs() {
+    if ! pgrep -q "Google Chrome"; then
+        return
+    fi
+
+    osascript << 'EOF' 2>/dev/null
+tell application "Google Chrome"
+    set output to ""
+    set winIndex to 0
+    repeat with w in windows
+        set winIndex to winIndex + 1
+        set tabIndex to 0
+        repeat with t in tabs of w
+            set tabIndex to tabIndex + 1
+            set tabTitle to title of t
+            set AppleScript's text item delimiters to "|"
+            set tabTitle to text items of tabTitle
+            set AppleScript's text item delimiters to "-"
+            set tabTitle to tabTitle as text
+            set AppleScript's text item delimiters to ""
+            if length of tabTitle > 60 then
+                set tabTitle to text 1 thru 57 of tabTitle & "..."
+            end if
+            set output to output & "Chrome: " & tabTitle & "|chrome|" & winIndex & "|" & tabIndex & "|0" & linefeed
+        end repeat
+    end repeat
+    return output
+end tell
+EOF
+}
+
+# Get app list with window details from yabai
+get_app_list() {
+    if ! yabai -m query --windows &>/dev/null; then
+        osascript << 'EOF' | grep -v "Helper" | sort -u | while read -r app; do
+tell application "System Events"
+    set appNames to displayed name of every process whose background only is false
+end tell
+set AppleScript's text item delimiters to linefeed
+return appNames as text
+EOF
+            echo "$app|app|||0"
+        done
+        return
+    fi
+
+    yabai -m query --windows | jq -r '
+        group_by(.app) |
+        .[] |
+        .[0] as $first |
+        if ($first.app == "Code" or $first.app == "Cursor") then
+            .[] |
+            .id as $id |
+            .title as $title |
+            ($title | split(" — ") | last) as $repo |
+            ($repo | sub(" \\(Workspace\\)$"; "")) as $cleanRepo |
+            "\(.app): \($cleanRepo)|window|\($id)||0"
+        elif ($first.app == "iTerm2" or $first.app == "Google Chrome") then
+            empty
+        else
+            "\($first.app)|app|||0"
+        end
+    ' | sort -u
+}
+
+# Build the cache
+SIGNAL_TTYS=$(get_signal_ttys)
+SIGNAL_PROJECTS=$(get_signal_projects)
+APP_LIST=$(get_app_list | grep -v '^$' | mark_signal_windows "$SIGNAL_PROJECTS")
+ITERM_TABS=$(get_iterm_tabs | grep -v '^$' | mark_signal_tabs "$SIGNAL_TTYS")
+CHROME_TABS=$(get_chrome_tabs | grep -v '^$')
+FOCUS_ORDER=$(get_app_focus_order)
+
+# Combine and sort
+TEMP_FILE=$(mktemp)
+{
+    echo "$ITERM_TABS"
+    echo "$CHROME_TABS"
+    echo "$APP_LIST"
+} | grep -v '^$' > "$TEMP_FILE"
+
+# Assign sort keys
+awk -F'|' -v OFS='|' '
+    NR == FNR { rank[$1] = NR; max_rank = NR; next }
+    {
+        priority = $5 + 0
+        if (priority == 2) {
+            $5 = 20000
+        } else if (priority == 1) {
+            $5 = 10000
+        } else {
+            app = ""
+            if ($2 == "iterm") app = "iTerm2"
+            else if ($2 == "chrome") app = "Google Chrome"
+            else if ($2 == "window") {
+                split($1, p, ":"); gsub(/^ +| +$/, "", p[1]); app = p[1]
+            }
+            else if ($2 == "app") app = $1
+            $5 = (app in rank) ? (max_rank + 1 - rank[app]) : 0
+        }
+        print
+    }
+' <(echo "$FOCUS_ORDER") "$TEMP_FILE" | sort -t'|' -k5 -rn > "${CACHE_FILE}.tmp"
+
+# Atomic replace
+mv "${CACHE_FILE}.tmp" "$CACHE_FILE"
+rm -f "$TEMP_FILE"

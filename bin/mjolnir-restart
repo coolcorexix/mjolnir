@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+
+# mjolnir-restart - Robust restart script for yabai and skhd
+# Handles stale PID files and ensures clean restarts
+
+set -e
+
+SERVICE="$1"
+ACTION="${2:-restart}"
+
+usage() {
+    echo "Usage: mjolnir-restart <service> [action]"
+    echo "  service: yabai, skhd, or all"
+    echo "  action: start, stop, restart (default: restart)"
+    exit 1
+}
+
+[ -z "$SERVICE" ] && usage
+
+USER=$(whoami)
+GUI_UID=$(id -u)
+
+# PID file locations
+YABAI_PID="/tmp/yabai_${USER}.pid"
+SKHD_PID="/tmp/skhd_${USER}.pid"
+
+# LaunchAgent labels
+YABAI_LABEL="com.koekeishiya.yabai"
+SKHD_LABEL="com.koekeishiya.skhd"
+
+cleanup_service() {
+    local name="$1"
+    local pid_file="$2"
+
+    # Force kill any running instances
+    pkill -9 -x "$name" 2>/dev/null || true
+
+    # Remove stale PID file
+    rm -f "$pid_file" 2>/dev/null || true
+
+    # Small delay to ensure cleanup is complete
+    sleep 0.5
+}
+
+start_service() {
+    local name="$1"
+    local label="$2"
+
+    # Use launchctl to start the service
+    launchctl kickstart "gui/${GUI_UID}/${label}" 2>/dev/null || true
+
+    # Verify it started
+    sleep 1
+    if pgrep -x "$name" >/dev/null; then
+        echo "$name started successfully"
+        return 0
+    else
+        echo "Warning: $name may not have started"
+        return 1
+    fi
+}
+
+stop_service() {
+    local name="$1"
+    local label="$2"
+    local pid_file="$3"
+
+    # Try graceful stop first
+    launchctl kill TERM "gui/${GUI_UID}/${label}" 2>/dev/null || true
+    sleep 0.5
+
+    # Force cleanup if still running
+    if pgrep -x "$name" >/dev/null; then
+        cleanup_service "$name" "$pid_file"
+    fi
+
+    echo "$name stopped"
+}
+
+restart_service() {
+    local name="$1"
+    local label="$2"
+    local pid_file="$3"
+
+    echo "Restarting $name..."
+
+    # Full cleanup
+    cleanup_service "$name" "$pid_file"
+
+    # Start fresh
+    start_service "$name" "$label"
+}
+
+case "$SERVICE" in
+    yabai)
+        case "$ACTION" in
+            start) start_service "yabai" "$YABAI_LABEL" ;;
+            stop) stop_service "yabai" "$YABAI_LABEL" "$YABAI_PID" ;;
+            restart) restart_service "yabai" "$YABAI_LABEL" "$YABAI_PID" ;;
+            *) usage ;;
+        esac
+        ;;
+    skhd)
+        case "$ACTION" in
+            start) start_service "skhd" "$SKHD_LABEL" ;;
+            stop) stop_service "skhd" "$SKHD_LABEL" "$SKHD_PID" ;;
+            restart) restart_service "skhd" "$SKHD_LABEL" "$SKHD_PID" ;;
+            *) usage ;;
+        esac
+        ;;
+    all)
+        case "$ACTION" in
+            start)
+                start_service "yabai" "$YABAI_LABEL"
+                start_service "skhd" "$SKHD_LABEL"
+                ;;
+            stop)
+                stop_service "skhd" "$SKHD_LABEL" "$SKHD_PID"
+                stop_service "yabai" "$YABAI_LABEL" "$YABAI_PID"
+                ;;
+            restart)
+                restart_service "yabai" "$YABAI_LABEL" "$YABAI_PID"
+                restart_service "skhd" "$SKHD_LABEL" "$SKHD_PID"
+                ;;
+            *) usage ;;
+        esac
+        ;;
+    *)
+        usage
+        ;;
+esac

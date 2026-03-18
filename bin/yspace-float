@@ -1,277 +1,30 @@
 #!/usr/bin/env bash
 
 # yspace-float - Floating app/space switcher
-# Uses yabai for querying window info, native activation for instant switching
+# Uses cached data from yspace-cache for instant display
 
 set -e
 
-# Temp file to store window/tab mappings
+CACHE_FILE="/tmp/yspace-float-cache"
 MAPPING_FILE="/tmp/yspace-float-mapping.$$"
 trap "rm -f $MAPPING_FILE" EXIT
 
-# Get apps in most-recently-focused order via CGWindowList (front-to-back layer order)
-get_app_focus_order() {
-    osascript -l JavaScript -e '
-        ObjC.import("CoreGraphics");
-        var wins = $.CGWindowListCopyWindowInfo($.kCGWindowListExcludeDesktopElements, 0);
-        var seen = {};
-        var result = [];
-        for (var i = 0; i < wins.count; i++) {
-            var w = wins.objectAtIndex(i);
-            var name = ObjC.unwrap(w.objectForKey("kCGWindowOwnerName"));
-            var layer = ObjC.unwrap(w.objectForKey("kCGWindowLayer"));
-            if (name && !seen[name] && layer === 0) {
-                seen[name] = true;
-                result.push(name);
-            }
-        }
-        result.join("\n");
-    ' 2>/dev/null
-}
-
-# Collect TTYs with their status (waiting/done) from signal files
-# Output format: tty|status (one per line)
-get_signal_ttys() {
-    SIGNAL_DIR="/tmp/mjolnir-claude-waiting"
-    if [ -d "$SIGNAL_DIR" ]; then
-        for f in "$SIGNAL_DIR"/*; do
-            [ -f "$f" ] || continue
-            jq -r '"\(.tty // "")|\(.status // "waiting")"' "$f" 2>/dev/null
-        done
+# Check if cache exists and is recent (less than 10 seconds old)
+if [ -f "$CACHE_FILE" ]; then
+    CACHE_AGE=$(($(date +%s) - $(stat -f %m "$CACHE_FILE")))
+    if [ "$CACHE_AGE" -lt 10 ]; then
+        cp "$CACHE_FILE" "$MAPPING_FILE"
     fi
-}
+fi
 
-# Collect project names with their status from signal files
-# Output format: project|status (one per line)
-get_signal_projects() {
-    SIGNAL_DIR="/tmp/mjolnir-claude-waiting"
-    if [ -d "$SIGNAL_DIR" ]; then
-        for f in "$SIGNAL_DIR"/*; do
-            [ -f "$f" ] || continue
-            local cwd=$(jq -r '.cwd // empty' "$f" 2>/dev/null)
-            local status=$(jq -r '.status // "waiting"' "$f" 2>/dev/null)
-            [ -n "$cwd" ] && echo "$(basename "$cwd")|$status"
-        done
+# If no valid cache, generate fresh (fallback)
+if [ ! -s "$MAPPING_FILE" ]; then
+    # Run cache script synchronously
+    ~/Documents/nemo-lab.nosync/mjolnir/bin/yspace-cache
+    if [ -f "$CACHE_FILE" ]; then
+        cp "$CACHE_FILE" "$MAPPING_FILE"
     fi
-}
-
-# Get iTerm2 tabs (with Claude Code waiting detection via signal files)
-get_iterm_tabs() {
-    if ! pgrep -q "iTerm2"; then
-        return
-    fi
-
-    osascript << 'EOF' 2>/dev/null
-tell application "iTerm2"
-    set output to ""
-    set winIndex to 0
-    repeat with w in windows
-        set winIndex to winIndex + 1
-        set tabIndex to 0
-        repeat with t in tabs of w
-            set tabIndex to tabIndex + 1
-            -- Get custom tab title if set, otherwise fall back to session name
-            try
-                set tabTitle to title of t
-                if tabTitle is "" or tabTitle is missing value then
-                    set tabTitle to name of current session of t
-                end if
-            on error
-                set tabTitle to name of current session of t
-            end try
-
-            -- Get the TTY of this session for matching against waiting signals
-            set sessionTTY to ""
-            try
-                set sessionTTY to tty of current session of t
-            end try
-
-            -- Replace pipe characters to avoid delimiter conflicts
-            set AppleScript's text item delimiters to "|"
-            set tabTitle to text items of tabTitle
-            set AppleScript's text item delimiters to "-"
-            set tabTitle to tabTitle as text
-            set AppleScript's text item delimiters to ""
-
-            set output to output & "iTerm2: " & tabTitle & "|iterm|" & winIndex & "|" & tabIndex & "|" & sessionTTY & linefeed
-        end repeat
-    end repeat
-    return output
-end tell
-EOF
-}
-
-# Post-process iTerm2 tabs: mark based on signal status (waiting/done)
-mark_signal_tabs() {
-    local signal_ttys="$1"  # format: tty|status per line
-    while IFS='|' read -r display type param1 param2 tty; do
-        [ -z "$display" ] && continue
-        local match_status=""
-        if [ -n "$tty" ] && [ -n "$signal_ttys" ]; then
-            # TTY from AppleScript is like "/dev/ttys001", signal file stores "ttys001"
-            local short_tty="${tty#/dev/}"
-            while IFS='|' read -r stty sstatus; do
-                if [ "$short_tty" = "$stty" ]; then
-                    match_status="$sstatus"
-                    break
-                fi
-            done <<< "$signal_ttys"
-        fi
-        case "$match_status" in
-            waiting)
-                echo "⏳ ${display}|${type}|${param1}|${param2}|2"  # priority 2 (highest)
-                ;;
-            done)
-                echo "✅ ${display}|${type}|${param1}|${param2}|1"  # priority 1 (high)
-                ;;
-            *)
-                echo "${display}|${type}|${param1}|${param2}|0"
-                ;;
-        esac
-    done
-}
-
-# Post-process Code/Cursor windows: mark based on signal status
-mark_signal_windows() {
-    local signal_projects="$1"  # format: project|status per line
-    while IFS='|' read -r display type param1 param2 flag; do
-        [ -z "$display" ] && continue
-        local match_status=""
-        # For Code/Cursor windows, check if project name matches any signal
-        if [ "$type" = "window" ] && [ -n "$signal_projects" ]; then
-            # Extract project name from display (e.g., "Code: mjolnir" -> "mjolnir")
-            local project_name="${display#*: }"
-            while IFS='|' read -r sproj sstatus; do
-                if [ "$project_name" = "$sproj" ]; then
-                    match_status="$sstatus"
-                    break
-                fi
-            done <<< "$signal_projects"
-        fi
-        case "$match_status" in
-            waiting)
-                echo "⏳ ${display}|${type}|${param1}|${param2}|2"
-                ;;
-            done)
-                echo "✅ ${display}|${type}|${param1}|${param2}|1"
-                ;;
-            *)
-                echo "${display}|${type}|${param1}|${param2}|${flag}"
-                ;;
-        esac
-    done
-}
-
-# Get Google Chrome tabs
-get_chrome_tabs() {
-    if ! pgrep -q "Google Chrome"; then
-        return
-    fi
-
-    osascript << 'EOF' 2>/dev/null
-tell application "Google Chrome"
-    set output to ""
-    set winIndex to 0
-    repeat with w in windows
-        set winIndex to winIndex + 1
-        set tabIndex to 0
-        repeat with t in tabs of w
-            set tabIndex to tabIndex + 1
-            set tabTitle to title of t
-            -- Replace pipe characters to avoid delimiter conflicts
-            set AppleScript's text item delimiters to "|"
-            set tabTitle to text items of tabTitle
-            set AppleScript's text item delimiters to "-"
-            set tabTitle to tabTitle as text
-            set AppleScript's text item delimiters to ""
-            -- Truncate long titles
-            if length of tabTitle > 60 then
-                set tabTitle to text 1 thru 57 of tabTitle & "..."
-            end if
-            set output to output & "Chrome: " & tabTitle & "|chrome|" & winIndex & "|" & tabIndex & "|0" & linefeed
-        end repeat
-    end repeat
-    return output
-end tell
-EOF
-}
-
-# Get app list with window details from yabai
-get_app_list() {
-    # Check if yabai is running
-    if ! yabai -m query --windows &>/dev/null; then
-        # Fallback to simple AppleScript list
-        osascript -e '
-            tell application "System Events"
-                set appNames to displayed name of every process whose background only is false
-            end tell
-            set AppleScript'\''s text item delimiters to linefeed
-            return appNames as text
-        ' | grep -v "Helper" | sort -u | while read -r app; do
-            echo "$app|app|||0"
-        done
-        return
-    fi
-
-    # Get windows from yabai (excluding iTerm2, we handle it separately)
-    yabai -m query --windows | jq -r '
-        group_by(.app) |
-        .[] |
-        .[0] as $first |
-        if ($first.app == "Code" or $first.app == "Cursor") then
-            .[] |
-            .id as $id |
-            .title as $title |
-            ($title | split(" — ") | last) as $repo |
-            ($repo | sub(" \\(Workspace\\)$"; "")) as $cleanRepo |
-            "\(.app): \($cleanRepo)|window|\($id)||0"
-        elif ($first.app == "iTerm2" or $first.app == "Google Chrome") then
-            empty
-        else
-            "\($first.app)|app|||0"
-        end
-    ' | sort -u
-}
-
-# Get the lists and save mappings
-SIGNAL_TTYS=$(get_signal_ttys)
-SIGNAL_PROJECTS=$(get_signal_projects)
-APP_LIST=$(get_app_list | grep -v '^$' | mark_signal_windows "$SIGNAL_PROJECTS")
-ITERM_TABS=$(get_iterm_tabs | grep -v '^$' | mark_signal_tabs "$SIGNAL_TTYS")
-CHROME_TABS=$(get_chrome_tabs | grep -v '^$')
-FOCUS_ORDER=$(get_app_focus_order)
-
-# Combine all entries into mapping file
-{
-    echo "$ITERM_TABS"
-    echo "$CHROME_TABS"
-    echo "$APP_LIST"
-} | grep -v '^$' > "$MAPPING_FILE"
-
-# Assign sort keys: waiting=20000, done=10000, rest ranked by app focus recency
-# CGWindowList returns apps front-to-back, so rank 1 = most recently focused
-awk -F'|' -v OFS='|' '
-    NR == FNR { rank[$1] = NR; max_rank = NR; next }
-    {
-        priority = $5 + 0  # convert to number
-        if (priority == 2) {
-            $5 = 20000  # waiting - highest priority
-        } else if (priority == 1) {
-            $5 = 10000  # done - high priority
-        } else {
-            app = ""
-            if ($2 == "iterm") app = "iTerm2"
-            else if ($2 == "chrome") app = "Google Chrome"
-            else if ($2 == "window") {
-                split($1, p, ":"); gsub(/^ +| +$/, "", p[1]); app = p[1]
-            }
-            else if ($2 == "app") app = $1
-            $5 = (app in rank) ? (max_rank + 1 - rank[app]) : 0
-        }
-        print
-    }
-' <(echo "$FOCUS_ORDER") "$MAPPING_FILE" | sort -t'|' -k5 -rn > "${MAPPING_FILE}.tmp"
-mv "${MAPPING_FILE}.tmp" "$MAPPING_FILE"
+fi
 
 # Extract display names for the picker
 FULL_LIST=$(cut -d'|' -f1 "$MAPPING_FILE" | grep -v '^$')
@@ -288,7 +41,7 @@ if [ -z "$SELECTED" ]; then
     exit 0
 fi
 
-# Find the mapping for the selected item (use awk for robust matching with special chars)
+# Find the mapping for the selected item
 MAPPING=$(awk -F'|' -v sel="$SELECTED" '$1 == sel {print; exit}' "$MAPPING_FILE")
 TYPE=$(echo "$MAPPING" | cut -d'|' -f2)
 PARAM1=$(echo "$MAPPING" | cut -d'|' -f3)
@@ -296,7 +49,6 @@ PARAM2=$(echo "$MAPPING" | cut -d'|' -f4)
 
 case "$TYPE" in
     iterm)
-        # iTerm2 tab: PARAM1=window index, PARAM2=tab index
         osascript << EOF
 tell application "iTerm2"
     activate
@@ -307,7 +59,6 @@ end tell
 EOF
         ;;
     chrome)
-        # Chrome tab: PARAM1=window index, PARAM2=tab index
         osascript << EOF
 tell application "Google Chrome"
     activate
@@ -317,16 +68,13 @@ end tell
 EOF
         ;;
     window)
-        # Specific window (Code/Cursor): PARAM1=window ID
         yabai -m window "$PARAM1" --focus
         ;;
     app)
-        # Regular app: just activate
         APP_NAME=$(echo "$SELECTED" | cut -d':' -f1)
         osascript -e "tell application \"$APP_NAME\" to activate"
         ;;
     *)
-        # Fallback: try to activate by name
         APP_NAME=$(echo "$SELECTED" | cut -d':' -f1)
         osascript -e "tell application \"$APP_NAME\" to activate"
         ;;
@@ -335,11 +83,9 @@ esac
 # Clear done signal if user focused on a completed item
 if [[ "$SELECTED" == "✅ "* ]]; then
     SIGNAL_DIR="/tmp/mjolnir-claude-waiting"
-    # Extract the actual name without the checkmark prefix
     CLEAN_NAME="${SELECTED#✅ }"
 
     if [ "$TYPE" = "window" ]; then
-        # Code/Cursor window - match by project name
         PROJECT_NAME="${CLEAN_NAME#*: }"
         for f in "$SIGNAL_DIR"/*; do
             [ -f "$f" ] || continue
@@ -351,9 +97,6 @@ if [[ "$SELECTED" == "✅ "* ]]; then
             fi
         done
     elif [ "$TYPE" = "iterm" ]; then
-        # iTerm tab - match by TTY (PARAM2 has tab index, need to get TTY from mapping)
-        # The TTY was in field 5 of original iterm output before marking
-        # For simplicity, match by project name from CWD if available
         for f in "$SIGNAL_DIR"/*; do
             [ -f "$f" ] || continue
             sig_status=$(jq -r '.status // empty' "$f" 2>/dev/null)

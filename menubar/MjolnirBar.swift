@@ -3,27 +3,43 @@ import Cocoa
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var statusTimer: Timer?
+    private var healthCheckTimer: Timer?
+    private var cacheTimer: Timer?
 
     private var yabaiRunning = false
     private var skhdRunning = false
+    private var lastSkhdHealthy = true
+    private var lastYabaiHealthy = true
+    private var consecutiveFailures: [String: Int] = ["skhd": 0, "yabai": 0]
 
     private var yabaiStatusItem: NSMenuItem!
     private var skhdStatusItem: NSMenuItem!
     private var launchAtLoginItem: NSMenuItem!
 
     private let pollingInterval: TimeInterval = 5.0
+    private let healthCheckInterval: TimeInterval = 30.0
+    private let maxConsecutiveFailures = 2
     private let launchAgentPath = NSString(string: "~/Library/LaunchAgents/com.nemolab.mjolnirbar.plist").expandingTildeInPath
     private let bundleIdentifier = "com.nemolab.mjolnirbar"
+    private let restartScriptPath = NSString(string: "~/Documents/nemo-lab.nosync/mjolnir/bin/mjolnir-restart").expandingTildeInPath
+    private let floatScriptPath = NSString(string: "~/bin/yspace-float").expandingTildeInPath
+    private let cacheScriptPath = NSString(string: "~/Documents/nemo-lab.nosync/mjolnir/bin/yspace-cache").expandingTildeInPath
+    private let cacheInterval: TimeInterval = 2.0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusBar()
         setupMenu()
         startStatusPolling()
+        startHealthCheck()
+        startCacheUpdater()
         updateServiceStatus()
+        updateCache() // Initial cache population
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         statusTimer?.invalidate()
+        healthCheckTimer?.invalidate()
+        cacheTimer?.invalidate()
     }
 
     // MARK: - Status Bar Setup
@@ -77,6 +93,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let skhdMenuItem = NSMenuItem(title: "skhd", action: nil, keyEquivalent: "")
         skhdMenuItem.submenu = skhdMenu
         menu.addItem(skhdMenuItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        // App Switcher
+        menu.addItem(createMenuItem("Open App Switcher", action: #selector(openFloatUI), keyEquivalent: ""))
 
         menu.addItem(NSMenuItem.separator())
 
@@ -183,16 +204,113 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func runServiceCommand(_ service: String, action: String) {
-        let command = "/opt/homebrew/bin/\(service)"
-        let argument = "--\(action)-service"
-
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.runShellCommand(command, arguments: [argument])
+            guard let self = self else { return }
+            self.runShellCommand(self.restartScriptPath, arguments: [service, action])
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                self?.updateServiceStatus()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                self.updateServiceStatus()
             }
         }
+    }
+
+    // MARK: - App List Cache
+
+    private func startCacheUpdater() {
+        cacheTimer = Timer.scheduledTimer(withTimeInterval: cacheInterval, repeats: true) { [weak self] _ in
+            self?.updateCache()
+        }
+        RunLoop.current.add(cacheTimer!, forMode: .common)
+    }
+
+    private func updateCache() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            self.runShellCommand("/bin/bash", arguments: [self.cacheScriptPath])
+        }
+    }
+
+    // MARK: - Health Check
+
+    private func startHealthCheck() {
+        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: healthCheckInterval, repeats: true) { [weak self] _ in
+            self?.performHealthCheck()
+        }
+        RunLoop.current.add(healthCheckTimer!, forMode: .common)
+    }
+
+    private func performHealthCheck() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+
+            // Check skhd health
+            let skhdHealthy = self.checkServiceHealth("skhd")
+            if !skhdHealthy {
+                self.consecutiveFailures["skhd", default: 0] += 1
+                if self.consecutiveFailures["skhd", default: 0] >= self.maxConsecutiveFailures {
+                    NSLog("MjolnirBar: skhd unhealthy, performing robust restart")
+                    self.robustRestart("skhd")
+                    self.consecutiveFailures["skhd"] = 0
+                }
+            } else {
+                self.consecutiveFailures["skhd"] = 0
+            }
+
+            // Check yabai health
+            let yabaiHealthy = self.checkServiceHealth("yabai")
+            if !yabaiHealthy {
+                self.consecutiveFailures["yabai", default: 0] += 1
+                if self.consecutiveFailures["yabai", default: 0] >= self.maxConsecutiveFailures {
+                    NSLog("MjolnirBar: yabai unhealthy, performing robust restart")
+                    self.robustRestart("yabai")
+                    self.consecutiveFailures["yabai"] = 0
+                }
+            } else {
+                self.consecutiveFailures["yabai"] = 0
+            }
+
+            DispatchQueue.main.async {
+                self.updateServiceStatus()
+            }
+        }
+    }
+
+    private func checkServiceHealth(_ service: String) -> Bool {
+        // First check if process is running
+        if !isProcessRunning(service) {
+            return false
+        }
+
+        // For skhd, check if PID file is stale (process running but can't restart)
+        if service == "skhd" {
+            let pidFile = "/tmp/skhd_\(NSUserName()).pid"
+            if FileManager.default.fileExists(atPath: pidFile) {
+                // Try to read PID and verify it matches running process
+                if let pidString = try? String(contentsOfFile: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+                   let filePid = Int32(pidString) {
+                    let (output, _) = runShellCommand("/usr/bin/pgrep", arguments: ["-x", service])
+                    let runningPids = output.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "\n").compactMap { Int32($0) }
+                    if !runningPids.contains(filePid) {
+                        NSLog("MjolnirBar: Stale PID file detected for \(service)")
+                        return false
+                    }
+                }
+            }
+        }
+
+        // For yabai, verify it responds to queries
+        if service == "yabai" {
+            let (_, exitCode) = runShellCommand("/opt/homebrew/bin/yabai", arguments: ["-m", "query", "--spaces"])
+            if exitCode != 0 {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    private func robustRestart(_ service: String) {
+        runShellCommand(restartScriptPath, arguments: [service, "restart"])
     }
 
     // MARK: - Service Actions
@@ -219,6 +337,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func restartSkhd() {
         runServiceCommand("skhd", action: "restart")
+    }
+
+    @objc private func openFloatUI() {
+        // Launch via NSWorkspace to ensure GUI apps like 'choose' can display
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/bash")
+        task.arguments = ["-l", "-c", floatScriptPath]
+
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:" + (env["PATH"] ?? "")
+        task.environment = env
+
+        do {
+            try task.run()
+        } catch {
+            NSLog("Failed to launch float UI: \(error)")
+        }
     }
 
     @objc private func startAll() {
