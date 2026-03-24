@@ -279,6 +279,7 @@ brew uninstall yabai skhd choose-gui jq
 - **Add**: `mjolnir-restart` script for robust service management (handles stale PID files)
 - **Add**: Health checks in MjolnirBar — auto-restarts unhealthy yabai/skhd
 - **Add**: "Open App Switcher" menu item in MjolnirBar
+- **Add**: Chrome tabs now searchable by URL domain (e.g., search "github", "google")
 
 ### 2025-03-17
 

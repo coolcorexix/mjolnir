@@ -173,15 +173,37 @@ tell application "Google Chrome"
         repeat with t in tabs of w
             set tabIndex to tabIndex + 1
             set tabTitle to title of t
+            set tabURL to URL of t
+
+            -- Extract domain from URL
+            set tabDomain to ""
+            try
+                if tabURL starts with "http" then
+                    set AppleScript's text item delimiters to "/"
+                    set urlParts to text items of tabURL
+                    if (count of urlParts) > 2 then
+                        set tabDomain to item 3 of urlParts
+                    end if
+                    set AppleScript's text item delimiters to ""
+                else if tabURL starts with "chrome://" then
+                    set tabDomain to "chrome"
+                end if
+            end try
+
+            -- Clean pipe characters from title
             set AppleScript's text item delimiters to "|"
             set tabTitle to text items of tabTitle
             set AppleScript's text item delimiters to "-"
             set tabTitle to tabTitle as text
             set AppleScript's text item delimiters to ""
-            if length of tabTitle > 60 then
-                set tabTitle to text 1 thru 57 of tabTitle & "..."
+
+            -- Truncate long titles
+            if length of tabTitle > 50 then
+                set tabTitle to text 1 thru 47 of tabTitle & "..."
             end if
-            set output to output & "Chrome: " & tabTitle & "|chrome|" & winIndex & "|" & tabIndex & "|0" & linefeed
+
+            -- Format: "Chrome: title [domain]"
+            set output to output & "Chrome: " & tabTitle & " [" & tabDomain & "]" & "|chrome|" & winIndex & "|" & tabIndex & "|0" & linefeed
         end repeat
     end repeat
     return output
