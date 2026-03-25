@@ -13,20 +13,36 @@ INPUT=$(cat)
 EVENT=$(echo "$INPUT" | jq -r '.hook_event_name')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id')
 
+# Get TTY, handling tmux case
+get_tty() {
+    # If running inside tmux, get the client's actual terminal TTY
+    if [ -n "$TMUX" ]; then
+        # Get the TTY of the tmux client (the real terminal)
+        local client_tty=$(tmux display-message -p '#{client_tty}' 2>/dev/null)
+        if [ -n "$client_tty" ]; then
+            # Convert /dev/ttys001 to ttys001
+            echo "${client_tty#/dev/}"
+            return
+        fi
+    fi
+
+    # Standard case: walk up process tree
+    local tty=$(ps -o tty= -p $PPID 2>/dev/null | tr -d ' ')
+    if [ -z "$tty" ] || [ "$tty" = "??" ]; then
+        local grandparent=$(ps -o ppid= -p $PPID 2>/dev/null | tr -d ' ')
+        tty=$(ps -o tty= -p "$grandparent" 2>/dev/null | tr -d ' ')
+    fi
+    echo "${tty:-unknown}"
+}
+
 case "$EVENT" in
     PermissionRequest)
         CWD=$(echo "$INPUT" | jq -r '.cwd')
         TOOL=$(echo "$INPUT" | jq -r '.tool_name // "unknown"')
-        # Walk up process tree to find the TTY of the Claude Code process
-        TTY=$(ps -o tty= -p $PPID 2>/dev/null | tr -d ' ')
-        if [ -z "$TTY" ] || [ "$TTY" = "??" ]; then
-            # Try grandparent if direct parent has no TTY
-            GRANDPARENT=$(ps -o ppid= -p $PPID 2>/dev/null | tr -d ' ')
-            TTY=$(ps -o tty= -p "$GRANDPARENT" 2>/dev/null | tr -d ' ')
-        fi
+        TTY=$(get_tty)
         jq -n \
             --arg cwd "$CWD" \
-            --arg tty "${TTY:-unknown}" \
+            --arg tty "$TTY" \
             --arg tool "$TOOL" \
             --arg ts "$(date +%s)" \
             --arg status "waiting" \
@@ -46,14 +62,10 @@ case "$EVENT" in
         else
             # Create new done signal if none exists
             CWD=$(echo "$INPUT" | jq -r '.cwd')
-            TTY=$(ps -o tty= -p $PPID 2>/dev/null | tr -d ' ')
-            if [ -z "$TTY" ] || [ "$TTY" = "??" ]; then
-                GRANDPARENT=$(ps -o ppid= -p $PPID 2>/dev/null | tr -d ' ')
-                TTY=$(ps -o tty= -p "$GRANDPARENT" 2>/dev/null | tr -d ' ')
-            fi
+            TTY=$(get_tty)
             jq -n \
                 --arg cwd "$CWD" \
-                --arg tty "${TTY:-unknown}" \
+                --arg tty "$TTY" \
                 --arg ts "$(date +%s)" \
                 --arg status "done" \
                 '{cwd: $cwd, tty: $tty, timestamp: $ts, status: $status}' \
