@@ -163,12 +163,12 @@ get_chrome_tabs() {
         return
     fi
 
-    osascript << 'EOF' 2>/dev/null
+    # Get raw tab data with window IDs for stable ordering
+    local raw_data=$(osascript << 'EOF' 2>/dev/null
 tell application "Google Chrome"
     set output to ""
-    set winIndex to 0
     repeat with w in windows
-        set winIndex to winIndex + 1
+        set winId to id of w
         set tabIndex to 0
         repeat with t in tabs of w
             set tabIndex to tabIndex + 1
@@ -202,13 +202,31 @@ tell application "Google Chrome"
                 set tabTitle to text 1 thru 47 of tabTitle & "..."
             end if
 
-            -- Format: "Chrome: title [domain]"
-            set output to output & "Chrome: " & tabTitle & " [" & tabDomain & "]" & "|chrome|" & winIndex & "|" & tabIndex & "|0" & linefeed
+            -- Output: winId|tabIndex|title|domain
+            set output to output & winId & "|" & tabIndex & "|" & tabTitle & "|" & tabDomain & linefeed
         end repeat
     end repeat
     return output
 end tell
 EOF
+)
+
+    # Build window ID to stable number mapping (sorted by ID = creation order)
+    local win_ids=$(echo "$raw_data" | cut -d'|' -f1 | sort -u -n)
+    declare -A win_num_map
+    local num=1
+    while read -r wid; do
+        [ -z "$wid" ] && continue
+        win_num_map[$wid]=$num
+        ((num++))
+    done <<< "$win_ids"
+
+    # Output with stable window numbers
+    echo "$raw_data" | while IFS='|' read -r winId tabIndex title domain; do
+        [ -z "$winId" ] && continue
+        local stable_num=${win_num_map[$winId]:-1}
+        echo "Chrome ${stable_num}: ${title} [${domain}]|chrome|${winId}|${tabIndex}|0"
+    done
 }
 
 # Get app list with window details from yabai

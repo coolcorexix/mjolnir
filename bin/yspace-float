@@ -62,8 +62,9 @@ EOF
         osascript << EOF
 tell application "Google Chrome"
     activate
-    set active tab index of window $PARAM1 to $PARAM2
-    set index of window $PARAM1 to 1
+    set targetWindow to (first window whose id is $PARAM1)
+    set active tab index of targetWindow to $PARAM2
+    set index of targetWindow to 1
 end tell
 EOF
         ;;

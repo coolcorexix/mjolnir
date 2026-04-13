@@ -281,6 +281,7 @@ brew uninstall yabai skhd choose-gui jq
 - **Add**: "Open App Switcher" menu item in MjolnirBar
 - **Add**: Chrome tabs now searchable by URL domain (e.g., search "github", "google")
 - **Fix**: Claude Code signals now work inside tmux sessions
+- **Add**: Chrome windows now numbered (Chrome 1, Chrome 2, etc.) for easier identification
 
 ### 2025-03-17
 
