@@ -4,7 +4,7 @@
 
 **Get notified when the LLM finishes / gets blocked visually or with sound.**
 
-![Mjolnir demo](https://github.com/coolcorexix/mjolnir/raw/main/demo/compressed_demo_mjolnir.gif)
+![Mjolnir demo](https://github.com/coolcorexix/mjolnir/raw/main/demo/demo_for_mjolnir.gif)
 
 ## The Problem
 
