@@ -2,6 +2,8 @@
 
 **Summon any open window anywhen (on macOS).**
 
+<video src="https://github.com/coolcorexix/mjolnir/raw/main/demo/demo_for_mjolnir_2x.mp4" controls width="100%"></video>
+
 ## The Problem
 
 If you're a developer working on a single monitor, you know the pain:

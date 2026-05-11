@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(ls:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push)",
+      "Bash(log show:*)",
+      "Bash(pgrep:*)",
+      "Bash(~/Documents/nemo-lab.nosync/mjolnir/bin/mjolnir-restart:*)",
+      "Bash(./build.sh:*)",
+      "Bash(/Users/huyphatpham/Documents/nemo-lab.nosync/mjolnir/bin/mjolnir-restart:*)",
+      "Bash(~/bin/yspace-float:*)",
+      "Bash(bash:*)",
+      "Bash(xxd:*)",
+      "Bash(~/Documents/nemo-lab.nosync/mjolnir/bin/yspace-cache:*)",
+      "Bash(osascript:*)",
+      "Bash(xargs:*)",
+      "Bash(lsof:*)",
+      "Bash(curl:*)",
+      "Bash(ps:*)",
+      "Bash(lsappinfo list:*)",
+      "Bash(git checkout:*)",
+      "Bash(/Users/huyphatpham/Documents/nemo-lab.nosync/mjolnir/bin/yspace-cache)"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "threads"
+  ],
+  "disabledMcpjsonServers": [
+    "threads"
+  ]
+}
