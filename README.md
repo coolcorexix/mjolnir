@@ -1,6 +1,7 @@
 # Mjolnir
 
-**Summon any open window anywhen (on macOS).**
+**Summon any open window anywhen (on macOS) instead of finding them (on macOS).**
+**Get notified when the LLM finishes / gets blocked visually or with sound.**
 
 <video src="https://github.com/coolcorexix/mjolnir/raw/main/demo/demo_for_mjolnir_2x.mp4" controls width="100%"></video>
 
