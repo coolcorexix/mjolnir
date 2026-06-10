@@ -296,3 +296,7 @@ brew uninstall yabai skhd choose-gui jq
 ## License
 
 MIT
+
+---
+
+More tools by the same author: [nemothecollector.dev/products](https://nemothecollector.dev/products)
